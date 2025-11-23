@@ -1,1 +1,47 @@
- 
+---
+config:
+  look: neo
+  layout: dagre
+---
+flowchart TB
+ subgraph Auth["User Login Flow"]
+        GA["Google OAuth Login"]
+        FA["Firebase Auth (UID, Session)"]
+  end
+ subgraph App["Mobile App"]
+        UI_Cam["Camera Feed"]
+        UI_Summary["Set Summary"]
+  end
+ subgraph ML["On-Device ML Pipeline"]
+        ML1["BlazePose – 33 Keypoints (Pose Overlay)"]
+        ML2["Exercise Classifier – 99.96%"]
+        ML3["Rep Segmentation"]
+        ML4["Form Scoring"]
+        ML_Audio["Audio Coaching"]
+        ML_Visual["Visual Feedback"]
+        ML9["Set Summary"]
+        ML10["Real-time Coaching Feedback"]
+  end
+ subgraph Firebase["Firebase Backend"]
+        FB_DB["Firestore"]
+        FB_Logic["In-depth Feedback (Combined ML + IMU)"]
+  end
+ subgraph IMU["ESP32 + IMU"]
+        I1["IMU Sensor (Accel + Gyro)"]
+        I2["IMU Data Upload → Firestore"]
+  end
+    GA --> FA
+    FA --> UI_Cam
+    UI_Cam --> ML1
+    ML1 --> ML2
+    ML2 --> ML3
+    ML3 --> ML4 & ML_Audio & ML_Visual
+    ML4 --> ML9
+    ML9 --> FB_DB
+    I1 --> I2
+    I2 --> FB_DB
+    FB_DB --> FB_Logic
+    FB_Logic --> UI_Summary
+    ML_Audio --> ML10
+    ML_Visual --> ML10
+    ML10 --> App 
