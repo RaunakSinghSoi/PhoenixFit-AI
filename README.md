@@ -1,58 +1,102 @@
-# PhoenixFit AI  
-Real-Time Form Analysis and Coaching System  
-SYSC 4907 – Capstone Project (2025–2026)
+# PhoenixFit AI
 
-## Overview
-PhoenixFit AI is a real-time exercise feedback system designed to assist users in performing resistance-training movements with greater accuracy, safety, and consistency. The system integrates computer vision, wearable sensor data, and a mobile application to deliver immediate form-related feedback. By combining pose estimation with IMU-based motion tracking, PhoenixFit AI identifies common lifting errors, provides corrective cues, and supports progressive training.
+A cross-platform fitness app built with React Native (Expo) featuring **real-time exercise rep counting** using computer vision and optional **IMU sensor integration**.
 
-The project focuses on three fundamental movements—squats, push-ups, and deadlifts—and evaluates user performance using joint-angle calculations, rep segmentation, depth analysis, and rule-based fault detection. Processing is performed on-device to ensure low-latency feedback suitable for real-time coaching.
+## Features
 
-## System Components
+- **Vision-Based Rep Counting** – Uses Mediapipe Pose to detect and count reps for Squat, Push-up, and Deadlift
+- **Form Feedback** – Real-time coaching tips based on body angles and posture
+- **IMU Integration** – Connect an ESP32 + BNO055 sensor for movement metrics (peak acceleration, power output)
+- **Workout Summary** – View reps, average score, duration, and IMU stats after each session
+- **Progress Tracking** – Calendar-based exercise logging with streak tracking
+- **Nutrition Logging** – Track meals and macros with USDA food database search
 
-### Mobile Application (React Native)
-The mobile client manages the camera feed, pose overlay visualization, real-time feedback interface, and Bluetooth Low Energy (BLE) communication with the wearable sensor. It functions as the primary interaction point for users.
+---
 
-### Machine Learning Pipeline
-The machine learning pipeline includes pose estimation model benchmarking, angle computation, rep detection, and rule-based form evaluation. It incorporates dataset experimentation, accuracy validation, and testing routines aligned with the project requirements.
+## Quick Start
 
-### Wearable Sensor Unit (Arduino Nano 33 BLE Sense)
-The wearable device streams accelerometer and gyroscope data through BLE to enhance pose-based analysis, especially under occlusion or rapid movement. Its architecture allows future extension to EMG sensing for muscle activation monitoring.
+### 1. Mobile App (Expo)
 
-### Database and Cloud Backend (Firebase)
-The backend handles authentication, Firestore data storage, cloud functions, and progress logging. The database structure records workout metrics, historical performance, and relevant user information.
-
-## Repository Structure
-
-```
-PhoenixFit-AI/
-│
-├── app/                     # Mobile application
-├── ml-pipeline/             # Models, scripts, angle calculations, scoring logic
-├── wearable-sensor/         # IMU firmware, BLE services, sensor code
-├── database/                # Firestore schema, rules, and cloud functions
-├── docs/                    # Proposal, reports, diagrams, documentation
-└── testing/                 # Accuracy tests, sensor validation, latency logs
+```bash
+npm install
+npx expo start
 ```
 
-## Team Members and Roles
+Scan the QR code with **Expo Go** on your phone.
 
-**Raunak Singh Soi - Machine Learning and Backend Integration**  
-Responsible for pose model evaluation, joint-angle computation, rep detection, scoring mechanisms, and integration of sensor data with the mobile application.
+### 2. Vision Server (Python)
 
-**Ronin Vicars - Software Development and Hardware Integration**  
-Responsible for BLE communication, IMU firmware development, hardware validation, and secondary support in machine learning and backend tasks.
+```bash
+cd Raunak_ML_code
+python -m venv .venv
+.venv\Scripts\activate        # Windows
+# source .venv/bin/activate   # Mac/Linux
+pip install -r requirements.txt
+uvicorn server:app --host 0.0.0.0 --port 8000
+```
 
-**Brix Velasco - Database and Cloud Services**  
-Responsible for Firestore schema design, cloud function logic, synchronization mechanisms, and database security rules.
+### 3. Connect App to Server
 
-**Yousif Muziel - Mobile Application Development**  
-Responsible for the React Native application, BLE integration, user interface workflow, and pose overlay implementation.
+1. Make sure your phone and computer are on the **same network**
+2. Find your computer's IP (`ipconfig` on Windows, `ifconfig` on Mac)
+3. In the app's Rep Tracking screen, tap the **settings icon** and enter: `http://YOUR_IP:8000`
 
-## Documentation
-All documentation, including the project proposal, diagrams, reports, and meeting records, is stored under the `docs/` directory.
+---
 
-## Timeline Summary
-The project timeline includes initial research and proposal preparation, model and BLE evaluation, prototype development, system integration, testing phases, and final reporting in accordance with SYSC 4907 capstone requirements.
+## IMU Setup (Optional)
 
-## Academic Statement
-This repository is part of the Carleton University SYSC 4907 Capstone Project. All materials herein are intended solely for academic evaluation and demonstration of engineering competencies in machine learning, embedded systems, mobile development, and distributed systems.
+1. Flash the ESP32 Arduino code to your ESP32 + BNO055
+2. Configure it to connect to your WiFi network
+3. In the app, tap **Connect IMU** and enter the WebSocket URL (e.g., `ws://192.168.1.50:81`)
+
+---
+
+## Project Structure
+
+```
+CapstoneFinal/
+├── src/
+│   ├── screens/           # App screens (Workout, Progress, Nutrition)
+│   ├── navigation/        # React Navigation setup
+│   └── components/        # Reusable UI components
+├── Raunak_ML_code/
+│   ├── server.py          # FastAPI vision server
+│   ├── requirements.txt   # Python dependencies
+│   └── utils/             # ML models and angle calculations
+└── package.json           # Node dependencies
+```
+
+---
+
+## Tech Stack
+
+| Component | Technology |
+|-----------|------------|
+| Mobile App | React Native, Expo |
+| Navigation | React Navigation |
+| Vision Server | FastAPI, Mediapipe, OpenCV |
+| ML Scoring | scikit-learn |
+| IMU Sensor | ESP32 + BNO055, WebSocket |
+| Data Storage | AsyncStorage (local) |
+
+---
+
+## How It Works
+
+1. **Camera captures frames** → Sent to Python server
+2. **Mediapipe detects pose** → Extracts body landmarks
+3. **Angle calculations** → Determines squat depth, elbow bend, etc.
+4. **Phase detection** → Tracks "up" vs "down" position
+5. **Rep counting** → Counts when user completes full range of motion
+6. **Form scoring** → ML model rates form quality
+
+---
+
+## Authors
+
+- Raunak Singh Soi – ML/Vision Code
+- [Your Name] – Mobile App Development
+
+## License
+
+MIT License - For educational purposes.
