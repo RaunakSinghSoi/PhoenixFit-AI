@@ -36,16 +36,16 @@ PhoenixFit-AI/
 
 ## Team Members and Roles
 
-**Raunak Singh Soi – Machine Learning and Backend Integration**  
+**Raunak Singh Soi - Machine Learning and Backend Integration**  
 Responsible for pose model evaluation, joint-angle computation, rep detection, scoring mechanisms, and integration of sensor data with the mobile application.
 
-**Ronin Vicars – Hardware Integration and Support Development**  
+**Ronin Vicars - Software Development and Hardware Integration**  
 Responsible for BLE communication, IMU firmware development, hardware validation, and secondary support in machine learning and backend tasks.
 
-**Brix Velasco – Database and Cloud Services**  
+**Brix Velasco - Database and Cloud Services**  
 Responsible for Firestore schema design, cloud function logic, synchronization mechanisms, and database security rules.
 
-**Yousif Muziel – Mobile Application Development**  
+**Yousif Muziel - Mobile Application Development**  
 Responsible for the React Native application, BLE integration, user interface workflow, and pose overlay implementation.
 
 ## Documentation
