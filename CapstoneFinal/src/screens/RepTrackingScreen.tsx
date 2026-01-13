@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, TouchableOpacity, Alert, Modal, TextInput, Scro
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImageManipulator from 'expo-image-manipulator';
+import * as Speech from 'expo-speech';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { ExerciseType } from './ExerciseSelectionScreen';
 import { useFocusEffect } from '@react-navigation/native';
@@ -108,6 +109,40 @@ export default function RepTrackingScreen({ route, navigation }: Props) {
   // Workout summary modal
   const [summaryModalVisible, setSummaryModalVisible] = React.useState(false);
   const [workoutSummary, setWorkoutSummary] = React.useState<WorkoutSummary | null>(null);
+
+  // Voice feedback state
+  const [voiceEnabled, setVoiceEnabled] = React.useState(true);
+  const lastSpokenRepRef = React.useRef<number>(0);
+  const lastSpokenCoachRef = React.useRef<string>('');
+  const lastCoachTimeRef = React.useRef<number>(0);
+  const COACH_SPEAK_COOLDOWN_MS = 3000; // Don't repeat same coaching tip within 3 seconds
+
+  // Voice feedback effect - announce reps
+  React.useEffect(() => {
+    if (!voiceEnabled || !running) return;
+    if (analysis.reps > lastSpokenRepRef.current && analysis.reps > 0) {
+      lastSpokenRepRef.current = analysis.reps;
+      Speech.speak(`${analysis.reps}`, { rate: 1.1, pitch: 1.0 });
+    }
+  }, [analysis.reps, running, voiceEnabled]);
+
+  // Voice feedback effect - announce coaching tips
+  React.useEffect(() => {
+    if (!voiceEnabled || !running) return;
+    const coach = analysis.coach;
+    if (!coach || coach.trim() === '' || coach === 'Good form!') return;
+    
+    const now = Date.now();
+    // Only speak if it's a new message or enough time has passed
+    if (coach !== lastSpokenCoachRef.current || (now - lastCoachTimeRef.current) > COACH_SPEAK_COOLDOWN_MS) {
+      lastSpokenCoachRef.current = coach;
+      lastCoachTimeRef.current = now;
+      // Small delay so it doesn't overlap with rep count
+      setTimeout(() => {
+        Speech.speak(coach, { rate: 0.95, pitch: 1.0 });
+      }, 500);
+    }
+  }, [analysis.coach, running, voiceEnabled]);
 
   // Load saved URLs
   React.useEffect(() => {
@@ -262,6 +297,16 @@ export default function RepTrackingScreen({ route, navigation }: Props) {
     frameIdRef.current = 0;
     lastAppliedFrameIdRef.current = -1;
 
+    // Reset voice feedback refs
+    lastSpokenRepRef.current = 0;
+    lastSpokenCoachRef.current = '';
+    lastCoachTimeRef.current = 0;
+
+    // Announce workout start
+    if (voiceEnabled) {
+      Speech.speak(`Starting ${exercise}`, { rate: 1.0, pitch: 1.0 });
+    }
+
     // Reset stats
     imuStatsRef.current = {
       sampleCount: 0, maxAccelMag: 0, sumAccelMag: 0,
@@ -300,6 +345,9 @@ export default function RepTrackingScreen({ route, navigation }: Props) {
   }
 
   function stopWorkout(showSummary = true) {
+    // Stop any ongoing speech
+    Speech.stop();
+
     if (!runningRef.current && !showSummary) {
       // Not running, just reset
       setRunning(false);
@@ -322,6 +370,13 @@ export default function RepTrackingScreen({ route, navigation }: Props) {
     setRunning(false);
     runningRef.current = false;
     runIdRef.current = '';
+
+    // Announce completion
+    if (voiceEnabled && wasRunning && finalReps > 0) {
+      setTimeout(() => {
+        Speech.speak(`Workout complete. ${finalReps} reps`, { rate: 1.0, pitch: 1.0 });
+      }, 300);
+    }
 
     if (showSummary && wasRunning && (finalReps > 0 || duration > 5)) {
       const summary: WorkoutSummary = {
@@ -478,6 +533,9 @@ export default function RepTrackingScreen({ route, navigation }: Props) {
             </TouchableOpacity>
             <Text style={styles.title}>{exerciseLabel}</Text>
             <View style={styles.headerIcons}>
+              <TouchableOpacity onPress={() => setVoiceEnabled(!voiceEnabled)} style={styles.iconButton}>
+                <Ionicons name={voiceEnabled ? "volume-high-outline" : "volume-mute-outline"} size={20} color={voiceEnabled ? "#10B981" : "#6B7280"} />
+              </TouchableOpacity>
               <TouchableOpacity onPress={toggleCameraFacing} style={styles.iconButton}>
                 <Ionicons name="camera-reverse-outline" size={20} color="#E5E7EB" />
               </TouchableOpacity>
