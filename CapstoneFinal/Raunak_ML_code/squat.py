@@ -58,7 +58,7 @@ def detect_phase(angles):
     # anything else = execution
     return "execution"
 
-# basic coaching rules
+# basic coaching rules (lenient - only flag clearly bad form)
 def coaching_rules(angles):
     knee_l = angles["knee_l"]
     knee_r = angles["knee_r"]
@@ -67,13 +67,16 @@ def coaching_rules(angles):
     if knee_l is None or knee_r is None:
         return ""
 
-    if knee_l < 70 or knee_r < 70:
+    # only flag extremely deep squats (way past parallel)
+    if knee_l < 50 or knee_r < 50:
         return "depth too low"
 
-    if abs(knee_l - knee_r) > 25:
+    # only flag significant knee imbalance
+    if abs(knee_l - knee_r) > 40:
         return "knees caving in"
 
-    if torso > 40:
+    # only flag excessive forward lean
+    if torso > 55:
         return "torso leaning forward"
 
     return ""
