@@ -15,8 +15,15 @@ import os
 import sys
 import time
 import threading
+import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+
+# Suppress noisy third-party warnings (protobuf, sklearn version, absl)
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+os.environ["GLOG_minloglevel"] = "2"
+warnings.filterwarnings("ignore", message="SymbolDatabase.GetPrototype")
+warnings.filterwarnings("ignore", category=UserWarning, module="google.protobuf")
 
 import numpy as np
 import cv2
@@ -62,16 +69,21 @@ class SessionState:
     score_cache: int = 75
     smoother: SmootherDict = None  # type: ignore
     last_seen_s: float = 0.0
-    # For better rep counting: track if user reached the "bottom" of the movement
     reached_bottom: bool = False
-    # Per-rep scoring: track scores during execution phase
-    current_rep_scores: list = None  # Scores collected during current rep
-    rep_scores: list = None          # Final score for each completed rep
-    latest_rep_score: int = None     # Score of the most recently completed rep
+    current_rep_scores: list = None
+    rep_scores: list = None
+    latest_rep_score: int = None
+    # Squat per-rep fault tracking (extremes during execution)
+    rep_min_knee: float = 180.0
+    # Minimum hip angle recorded in mid/deep squat.
+    # Lower angle => more forward lean (e.g., <80 is usually excessive).
+    rep_min_hip_mid: float = 180.0
+    # Post-rep feedback (shown for N frames after completion, then clears)
+    last_rep_feedback: str = ""
+    feedback_frames_left: int = 0
 
     def __post_init__(self):
         if self.smoother is None:
-            # Reduced from 6 to 3 for faster response to movements
             self.smoother = SmootherDict(3)
         if self.current_rep_scores is None:
             self.current_rep_scores = []
@@ -184,10 +196,13 @@ def _detect_phase_squat(angles: Dict[str, Optional[float]], session: "SessionSta
     
     min_knee = min(knee_l, knee_r)
     
-    # More lenient thresholds for real-world use
-    STANDING_THRESHOLD = 150  # Above this = standing (setup) - lowered from 160
-    SQUAT_THRESHOLD = 140     # Below this = squatting (execution) - lowered from 150
-    DEPTH_THRESHOLD = 130     # Must reach this depth to count - lowered from 120
+    # Simple thresholds:
+    # - "resting/standing" is knee angle > 160°
+    # - enter execution once knee bends below the squat threshold
+    # - depth is tracked for coaching (reps still count even if shallow)
+    STANDING_THRESHOLD = 160
+    SQUAT_THRESHOLD = 150
+    DEPTH_THRESHOLD = 130
     
     reached_bottom = session.reached_bottom
     
@@ -212,75 +227,39 @@ def _detect_phase_squat(angles: Dict[str, Optional[float]], session: "SessionSta
         return "execution", reached_bottom
 
 
-def _coach_squat(angles: Dict[str, Optional[float]]) -> str:
-    """
-    Legacy coaching function - only used as fallback.
-    Main squat coaching now uses generate_squat_feedback() which is ML-aware.
-    """
-    return ""
 
+def _evaluate_squat_rep(session: "SessionState", rep_score: Optional[int]) -> str:
+    """
+    Called once when a squat rep completes.
+    Angles are checked FIRST regardless of score — score is only used
+    as a fallback when no angle fault is detected.
+    """
+    min_knee = session.rep_min_knee
+    min_hip_mid = session.rep_min_hip_mid
 
-def generate_squat_feedback(score: int, angles: Dict[str, Optional[float]]) -> str:
-    """
-    ML-aware coaching feedback for squats.
-    Uses the ML score to determine tone, angles for specificity.
-    
-    VERY LENIENT thresholds - only triggers on clearly bad form.
-    Good squats should get no feedback or just positive reinforcement.
-    """
-    torso = angles.get("torso")
-    knee_l = angles.get("knee_l")
-    knee_r = angles.get("knee_r")
-    
-    # Safety check
-    if torso is None or knee_l is None or knee_r is None:
-        return ""
-    
-    min_knee = min(knee_l, knee_r)
-    knee_diff = abs(knee_l - knee_r)
-    
-    # ----------------------------
-    # EXCELLENT (80+) - Almost never give feedback
-    # ----------------------------
-    if score >= 80:
-        # Only mention if something is REALLY off (shouldn't happen at 80+)
-        if torso > 50:
-            return "Great rep! Watch the forward lean."
-        return ""  # No feedback needed for excellent reps
-    
-    # ----------------------------
-    # GOOD (70-79) - Rarely give feedback
-    # ----------------------------
-    if score >= 70:
-        # Only flag if clearly off - very lenient
-        if torso > 45:
-            return "Good rep! Stay more upright."
-        if knee_diff > 35:
-            return "Good rep! Keep knees balanced."
-        return ""  # No feedback for good reps
-    
-    # ----------------------------
-    # DECENT (60-69) - Occasional guidance
-    # ----------------------------
-    if score >= 60:
-        if torso > 40:
-            return "Watch your forward lean."
-        if min_knee > 130:
-            return "Try to go a bit deeper."
-        if knee_diff > 30:
-            return "Keep your knees balanced."
-        return ""  # Even decent reps - no constant nagging
-    
-    # ----------------------------
-    # POOR (<60) - Give clear feedback
-    # ----------------------------
-    if torso > 50:
-        return "Too much forward lean."
-    if min_knee > 140:
-        return "Squat deeper."
-    if knee_diff > 40:
-        return "Knees caving in."
-    return "Focus on form."
+    print(f"[EVAL] min_knee={min_knee:.1f}° min_hip_mid={min_hip_mid:.1f}° score={rep_score}")
+
+    score_value = int(rep_score) if rep_score is not None else int(session.score_cache)
+
+    if score_value >= 80:
+        rating = "Great rep."
+    elif score_value >= 60:
+        rating = "Good rep."
+    elif score_value < 50:
+        rating = "Bad rep."
+    else:
+        rating = "Needs work."
+
+    fault = ""
+    # User-tested thresholds:
+    # - depth fault if knees never got to <= 90°
+    # - lean fault if hip angle dropped below 80° in mid/deep squat
+    if min_knee > 90:
+        fault = "Not enough depth."
+    elif min_hip_mid < 80:
+        fault = "Too much forward lean."
+
+    return f"{score_value} {rating} {fault}".strip()
 
 
 def _compute_pushup_angles(lm) -> Dict[str, Optional[float]]:
@@ -446,11 +425,26 @@ def _analyze(exercise: str, session: SessionState, lm) -> Tuple[Dict[str, Any], 
         angles_raw = _compute_squat_angles(lm)
         angles = session.smoother.update(angles_raw)
         phase, reached_bottom = _detect_phase_squat(angles, session)
-        # Use ML-aware feedback (uses cached score from previous frames)
-        coach = generate_squat_feedback(session.score_cache, angles)
+        coach = ""
         feat = [angles.get("knee_l"), angles.get("knee_r"), angles.get("torso")]
         feat = [float(x) if x is not None else 0.0 for x in feat]
         score_ex = "squat"
+
+        # Track worst angles during execution (evaluated after rep completes)
+        if phase == "execution":
+            kl = angles.get("knee_l")
+            kr = angles.get("knee_r")
+            hl = angles.get("hip_l")
+            hr = angles.get("hip_r")
+            if kl is not None and kr is not None:
+                mk = min(kl, kr)
+                if mk < session.rep_min_knee:
+                    session.rep_min_knee = mk
+                # Only evaluate lean once user reaches mid/deeper squat.
+                if mk < 145 and hl is not None and hr is not None:
+                    mh = min(hl, hr)
+                    if mh < session.rep_min_hip_mid:
+                        session.rep_min_hip_mid = mh
     elif exercise == "pushup":
         angles_raw = _compute_pushup_angles(lm)
         angles = session.smoother.update(angles_raw)
@@ -488,27 +482,44 @@ def _analyze(exercise: str, session: SessionState, lm) -> Tuple[Dict[str, Any], 
     rep_just_completed = False
     latest_rep_score = None
 
-    # Rep logic: execution -> setup transition, but ONLY if user reached depth
+    # Rep lifecycle:
+    # - reset tracking when a new execution phase starts
+    # - count a rep on execution -> setup regardless of depth (depth is coached)
+    if exercise == "squat" and session.prev_phase == "setup" and phase == "execution":
+        session.rep_min_knee = 180.0
+        session.rep_min_hip_mid = 180.0
+        session.current_rep_scores = []
+
     if session.prev_phase == "execution" and phase == "setup":
-        if session.reached_bottom:
-            session.reps += 1
-            session.reached_bottom = False  # Reset for next rep
-            
-            # Calculate this rep's final score (use best score during execution)
-            if session.current_rep_scores:
-                raw_score = max(session.current_rep_scores)
-                # Apply smart scaling: only boost scores above 70
-                latest_rep_score = _scale_score(raw_score)
-                session.rep_scores.append(latest_rep_score)
-                session.latest_rep_score = latest_rep_score
-                session.score_cache = latest_rep_score  # Update displayed score
-                print(f"[REP] +1 rep! Total: {session.reps} Raw: {raw_score} -> Scaled: {latest_rep_score} ({exercise})")
-            
-            session.current_rep_scores = []  # Reset for next rep
-            rep_just_completed = True
+        session.reps += 1
+        session.reached_bottom = False
+
+        if session.current_rep_scores:
+            raw_score = max(session.current_rep_scores)
+            latest_rep_score = _scale_score(raw_score)
+            session.rep_scores.append(latest_rep_score)
+            session.latest_rep_score = latest_rep_score
+            session.score_cache = latest_rep_score
+            print(f"[REP] +1 rep! Total: {session.reps} Raw: {raw_score} -> Scaled: {latest_rep_score} ({exercise})")
+
+        session.current_rep_scores = []
+        rep_just_completed = True
+
+    # Squat coaching: evaluate once per rep, display for ~3 seconds afterward
+    if exercise == "squat":
+        if rep_just_completed:
+            rep_score_for_feedback = latest_rep_score if latest_rep_score is not None else session.score_cache
+            coach = _evaluate_squat_rep(session, rep_score_for_feedback)
+            session.last_rep_feedback = coach
+            session.feedback_frames_left = 25
+            if coach:
+                print(f"[COACH] {coach}")
+        elif session.feedback_frames_left > 0:
+            coach = session.last_rep_feedback
+            session.feedback_frames_left -= 1
         else:
-            session.current_rep_scores = []  # Reset without counting
-            print(f"[REP] Returned to standing but didn't reach depth - no rep counted")
+            coach = ""
+
     session.prev_phase = phase
 
     session.frame_count += 1
