@@ -95,8 +95,9 @@ CapstoneFinal/
 ## Authors
 
 - Raunak Singh Soi – ML/Vision Code
-- [Your Name] – Mobile App Development
+- Ronin Vicars – Mobile App Development
 
 ## License
 
 MIT License - For educational purposes.
+
