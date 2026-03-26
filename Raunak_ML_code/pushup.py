@@ -16,6 +16,10 @@ mp_pose = mp.solutions.pose
 def get_xy(lm, idx, w, h):
     return int(lm[idx].x * w), int(lm[idx].y * h)
 
+def avg_visibility(lm, idxs):
+    vals = [float(getattr(lm[i], "visibility", 0.0)) for i in idxs]
+    return float(sum(vals) / len(vals)) if vals else 0.0
+
 # compute pushup angles
 def compute_pushup_angles(lm, w, h):
     # left arm
@@ -31,45 +35,109 @@ def compute_pushup_angles(lm, w, h):
     elbow_l = angle_3pts(ls, le, lw)
     elbow_r = angle_3pts(rs, re, rw)
 
-    # torso alignment (shoulder–hip)
-    sh = get_xy(lm, 11, w, h)
-    hp = get_xy(lm, 23, w, h)
-    ankle = get_xy(lm, 27, w, h)
+    # Use the better visible side for body-line checks.
+    vis_l = avg_visibility(lm, (11, 13, 15, 23, 27))
+    vis_r = avg_visibility(lm, (12, 14, 16, 24, 28))
+    if vis_l >= vis_r:
+        sh = get_xy(lm, 11, w, h)
+        hp = get_xy(lm, 23, w, h)
+        ankle = get_xy(lm, 27, w, h)
+        elbow_ref = elbow_l
+    else:
+        sh = get_xy(lm, 12, w, h)
+        hp = get_xy(lm, 24, w, h)
+        ankle = get_xy(lm, 28, w, h)
+        elbow_ref = elbow_r
 
     torso = angle_3pts(sh, hp, ankle)
+    line_y = None
+    dx = float(ankle[0] - sh[0])
+    if abs(dx) > 1e-3:
+        t = (float(hp[0]) - float(sh[0])) / dx
+        line_y = float(sh[1]) + t * (float(ankle[1]) - float(sh[1]))
+    hip_line_delta = float(hp[1] - line_y) if line_y is not None else 0.0
 
     return {
         "elbow_l": elbow_l,
         "elbow_r": elbow_r,
-        "torso": torso
+        "elbow_ref": elbow_ref,
+        "vis_l": vis_l,
+        "vis_r": vis_r,
+        "torso": torso,
+        "hip_line_delta": hip_line_delta,
     }
 
-# only setup + execution
-def detect_phase(angles):
-    elbow_l = angles["elbow_l"]
-    elbow_r = angles["elbow_r"]
+# setup/execution phase with hysteresis + depth tracking
+def detect_phase(angles, prev_phase, reached_bottom):
+    elbow_ref = angles["elbow_ref"]
+    if elbow_ref is None:
+        return "setup", reached_bottom
 
-    if elbow_l is None or elbow_r is None:
-        return "setup"
+    EXTENDED_THRESHOLD = 150
+    BENT_THRESHOLD = 135
+    DEPTH_THRESHOLD = 118
 
-    if elbow_l > 150 and elbow_r > 150:
-        return "setup"
+    if elbow_ref < DEPTH_THRESHOLD:
+        reached_bottom = True
 
-    return "execution"
+    if prev_phase == "setup":
+        if elbow_ref < BENT_THRESHOLD:
+            return "execution", reached_bottom
+        return "setup", reached_bottom
+    else:
+        if elbow_ref > EXTENDED_THRESHOLD:
+            return "setup", reached_bottom
+        return "execution", reached_bottom
 
 # coaching logic
-def coaching_rules(angles):
+def coaching_rules(angles, phase, reached_bottom):
+    if phase == "setup":
+        return ""
+
+    torso = angles["torso"]
+    hip_line_delta = angles["hip_line_delta"]
     elbow_l = angles["elbow_l"]
     elbow_r = angles["elbow_r"]
-    torso = angles["torso"]
+    elbow_ref = angles["elbow_ref"]
 
-    if elbow_l < 70 or elbow_r < 70:
-        return "elbows collapsing too much"
+    if hip_line_delta > 25:
+        return "don't let hips sag"
 
-    if torso < 150:
-        return "hips sagging"
+    if hip_line_delta < -25:
+        return "keep hips down"
+
+    if torso is not None and torso < 130:
+        return "straighten your body"
+
+    if elbow_l is not None and elbow_r is not None and abs(elbow_l - elbow_r) > 25:
+        return "even out your arms"
+
+    if elbow_ref is not None and elbow_ref > 120 and not reached_bottom:
+        return "go deeper"
 
     return ""
+
+
+def form_adjusted_score(ml_score, angles, phase):
+    if phase == "setup":
+        return ml_score
+
+    score = float(ml_score)
+    torso = angles["torso"]
+    hip_line_delta = angles["hip_line_delta"]
+    elbow_l = angles["elbow_l"]
+    elbow_r = angles["elbow_r"]
+
+    if torso is not None and torso < 130:
+        score -= 20
+
+    if abs(hip_line_delta) > 25:
+        score -= 15
+
+    if elbow_l is not None and elbow_r is not None and abs(elbow_l - elbow_r) > 25:
+        score -= 10
+
+    return int(max(0, min(100, score)))
 
 def run_pushup():
     print("pushup mode (balanced + full overlay). press esc to exit.")
@@ -84,10 +152,10 @@ def run_pushup():
 
     reps = 0
     prev_phase = "setup"
+    reached_bottom = False
 
     frame_id = 0
     score_cache = 75
-    ui_cache = None
 
     t0 = time.time()
     fps_val = 0
@@ -118,21 +186,24 @@ def run_pushup():
         angles_raw = compute_pushup_angles(lm, w, h)
         angles = smoother.update(angles_raw)
 
-        phase = detect_phase(angles)
+        phase, reached_bottom = detect_phase(angles, prev_phase, reached_bottom)
 
         if prev_phase == "execution" and phase == "setup":
-            reps += 1
+            if reached_bottom:
+                reps += 1
+            reached_bottom = False
         prev_phase = phase
 
-        if frame_id % 5 == 0:
+        if frame_id % 2 == 0:
             feat = [
                 angles["elbow_l"],
                 angles["elbow_r"],
                 angles["torso"]
             ]
-            score_cache = predict_score("pushup", feat)
+            raw_score = predict_score("pushup", feat)
+            score_cache = form_adjusted_score(raw_score, angles, phase)
 
-        coach = coaching_rules(angles)
+        coach = coaching_rules(angles, phase, reached_bottom)
 
         mp.solutions.drawing_utils.draw_landmarks(
             frame,
@@ -147,20 +218,17 @@ def run_pushup():
             "torso": angles["torso"]
         }
 
-        if frame_id % 2 == 0:
-            ui_cache = draw_full_overlay(
-                frame,
-                phase=phase,
-                reps=reps,
-                angles=angle_panel,
-                score=score_cache,
-                coach=coach,
-                fps=fps_val
-            )
-        else:
-            frame = ui_cache
+        ui_frame = draw_full_overlay(
+            frame,
+            phase=phase,
+            reps=reps,
+            angles=angle_panel,
+            score=score_cache,
+            coach=coach,
+            fps=fps_val
+        )
 
-        cv2.imshow("PhoenixFit – Pushup", ui_cache)
+        cv2.imshow("PhoenixFit – Pushup", ui_frame)
 
         key = cv2.waitKey(1) & 0xFF
         if key == 27:
