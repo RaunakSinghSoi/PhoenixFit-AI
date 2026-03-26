@@ -5,9 +5,16 @@ import time
 
 # semi-transparent rectangle helper
 def draw_panel(frame, x, y, w, h, color=(0,0,0), alpha=0.45):
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (x, y), (x + w, y + h), color, -1)
-    return cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
+    fh, fw = frame.shape[:2]
+    x1, y1 = max(0, x), max(0, y)
+    x2, y2 = min(fw, x + w), min(fh, y + h)
+    if x2 <= x1 or y2 <= y1:
+        return frame
+    roi = frame[y1:y2, x1:x2]
+    rect = roi.copy()
+    cv2.rectangle(rect, (0, 0), (x2 - x1, y2 - y1), color, -1)
+    cv2.addWeighted(rect, alpha, roi, 1 - alpha, 0, dst=roi)
+    return frame
 
 # clean text helper
 def put_text(frame, text, x, y, size=0.7, color=(255,255,255), thick=2):
