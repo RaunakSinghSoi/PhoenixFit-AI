@@ -85,6 +85,10 @@ class SessionState:
     rep_min_hinge: float = 180.0
     rep_max_torso: float = 0.0
     rep_max_knee_diff: float = 0.0
+    # Pushup per-rep metric tracking.
+    rep_min_elbow: float = 180.0
+    # Most negative value indicates hips above shoulder-ankle line (butt too high).
+    rep_min_hip_line_delta: float = 1.0
 
     def __post_init__(self):
         if self.smoother is None:
@@ -278,12 +282,39 @@ def _compute_pushup_angles(lm) -> Dict[str, Optional[float]]:
     elbow_l = float(angle_3pts(ls, le, lw))
     elbow_r = float(angle_3pts(rs, re, rw))
 
-    sh = _get_xy_norm(lm, 11)
-    hp = _get_xy_norm(lm, 23)
-    ankle = _get_xy_norm(lm, 27)
+    # Use the best visible side for side-view pushup geometry.
+    vis_l = _visibility_confidence(lm, (11, 13, 15, 23, 27))
+    vis_r = _visibility_confidence(lm, (12, 14, 16, 24, 28))
+    elbow_ref = elbow_l if vis_l >= vis_r else elbow_r
+    if vis_l >= vis_r:
+        sh = _get_xy_norm(lm, 11)
+        hp = _get_xy_norm(lm, 23)
+        ankle = _get_xy_norm(lm, 27)
+    else:
+        sh = _get_xy_norm(lm, 12)
+        hp = _get_xy_norm(lm, 24)
+        ankle = _get_xy_norm(lm, 28)
+
     torso = float(angle_3pts(sh, hp, ankle))
 
-    return {"elbow_l": elbow_l, "elbow_r": elbow_r, "torso": torso}
+    # Vertical delta between hip and shoulder-ankle line at hip.x.
+    # Negative => hip above line (butt in the air), positive => hips sagging.
+    line_y = None
+    dx = float(ankle[0] - sh[0])
+    if abs(dx) > 1e-3:
+        t = (float(hp[0]) - float(sh[0])) / dx
+        line_y = float(sh[1]) + t * (float(ankle[1]) - float(sh[1]))
+    hip_line_delta = float(hp[1] - line_y) if line_y is not None else None
+
+    return {
+        "elbow_l": elbow_l,
+        "elbow_r": elbow_r,
+        "elbow_ref": float(elbow_ref),
+        "vis_l": float(vis_l),
+        "vis_r": float(vis_r),
+        "torso": torso,
+        "hip_line_delta": hip_line_delta,
+    }
 
 
 def _detect_phase_pushup(angles: Dict[str, Optional[float]], session: "SessionState") -> Tuple[str, bool]:
@@ -291,50 +322,65 @@ def _detect_phase_pushup(angles: Dict[str, Optional[float]], session: "SessionSt
     Returns (phase, reached_bottom).
     For pushups: setup = arms extended, execution = arms bent
     """
-    elbow_l = angles.get("elbow_l")
-    elbow_r = angles.get("elbow_r")
-    if elbow_l is None or elbow_r is None:
+    elbow_ref = angles.get("elbow_ref")
+    if elbow_ref is None:
         return "setup", session.reached_bottom
-    
-    min_elbow = min(elbow_l, elbow_r)
-    
-    # More lenient thresholds
-    EXTENDED_THRESHOLD = 145   # Above this = arms extended (setup) - lowered from 155
-    BENT_THRESHOLD = 130       # Below this = arms bent (execution) - lowered from 145
-    DEPTH_THRESHOLD = 120      # Must bend this much to count - raised from 100
-    
+
+    # Side-view thresholds (with 3-frame smoothing, raw angles are dampened):
+    #   Lockout top: raw ~160-175, smoothed ~145-160
+    #   Bottom:      raw ~70-95,  smoothed ~80-100
+    EXTENDED_THRESHOLD = 148
+    BENT_THRESHOLD = 130
+    DEPTH_THRESHOLD = 100
+
     reached_bottom = session.reached_bottom
-    
-    # Check if reached depth
-    if min_elbow < DEPTH_THRESHOLD:
+
+    if elbow_ref < DEPTH_THRESHOLD:
         reached_bottom = True
-    
-    # Debug logging
-    if session.frame_count % 10 == 0:
-        print(f"[PUSHUP] elbow_min={min_elbow:.1f}° phase={session.prev_phase} depth_reached={reached_bottom}")
-    
-    # Determine phase with hysteresis
+
+    if session.frame_count % 15 == 0:
+        print(
+            f"[PUSHUP] elbow_ref={elbow_ref:.1f}° "
+            f"phase={session.prev_phase} depth={reached_bottom}"
+        )
+
     if session.prev_phase == "setup":
-        if min_elbow < BENT_THRESHOLD:
+        if elbow_ref < BENT_THRESHOLD:
             return "execution", reached_bottom
         return "setup", reached_bottom
     else:
-        if min_elbow > EXTENDED_THRESHOLD:
+        if elbow_ref > EXTENDED_THRESHOLD:
             return "setup", reached_bottom
         return "execution", reached_bottom
 
 
-def _coach_pushup(angles: Dict[str, Optional[float]]) -> str:
-    elbow_l = angles.get("elbow_l")
-    elbow_r = angles.get("elbow_r")
+def _coach_pushup(angles: Dict[str, Optional[float]], phase: str) -> str:
+    elbow_ref = angles.get("elbow_ref")
     torso = angles.get("torso")
-    if elbow_l is None or elbow_r is None or torso is None:
+    hip_line_delta = angles.get("hip_line_delta")
+    if elbow_ref is None or torso is None:
         return ""
-    if elbow_l < 70 or elbow_r < 70:
-        return "elbows collapsing too much"
-    if torso < 150:
-        return "hips sagging"
+    if phase == "setup":
+        return ""
+    if hip_line_delta is not None and hip_line_delta < -0.09:
+        return "keep hips down"
+    if torso is not None and torso < 130:
+        return "straighten your body"
     return ""
+
+
+def _evaluate_pushup_rep(session: "SessionState", _model_score: Optional[int]) -> Tuple[int, str]:
+    """
+    Rule-based pushup rep evaluation.  The ML model isn't reliable for
+    side-view pushups, so we score purely on body-line geometry.
+    Only penalise for clearly bad form (butt way up in the air).
+    """
+    min_hip_delta = float(session.rep_min_hip_line_delta)
+
+    if min_hip_delta < -0.09:
+        return 55, "Butt in the air."
+
+    return 90, "Good rep!"
 
 
 def _compute_deadlift_angles(lm) -> Dict[str, Optional[float]]:
@@ -496,10 +542,19 @@ def _analyze(exercise: str, session: SessionState, lm) -> Tuple[Dict[str, Any], 
         angles_raw = _compute_pushup_angles(lm)
         angles = session.smoother.update(angles_raw)
         phase, reached_bottom = _detect_phase_pushup(angles, session)
-        coach = _coach_pushup(angles)
+        coach = _coach_pushup(angles, phase)
         feat = [angles.get("elbow_l"), angles.get("elbow_r"), angles.get("torso")]
         feat = [float(x) if x is not None else 0.0 for x in feat]
         score_ex = "pushup"
+
+        # Track per-rep pushup extremes during execution.
+        if phase == "execution":
+            er = angles.get("elbow_ref")
+            hd = angles.get("hip_line_delta")
+            if er is not None and er < session.rep_min_elbow:
+                session.rep_min_elbow = er
+            if hd is not None and hd < session.rep_min_hip_line_delta:
+                session.rep_min_hip_line_delta = hd
     elif exercise == "deadlift":
         angles_raw = _compute_deadlift_angles(lm)
         angles = session.smoother.update(angles_raw)
@@ -567,11 +622,15 @@ def _analyze(exercise: str, session: SessionState, lm) -> Tuple[Dict[str, Any], 
 
     # Rep lifecycle:
     # - reset tracking when a new execution phase starts
-    # - for deadlifts, count a rep only if depth was reached before lockout
+    # - for pushups/deadlifts, count a rep only if depth was reached before lockout
     if exercise == "squat" and session.prev_phase == "setup" and phase == "execution":
         session.rep_min_knee = 180.0
         session.rep_min_hip_mid = 180.0
         session.current_rep_scores = []
+    elif exercise == "pushup" and session.prev_phase == "setup" and phase == "execution":
+        session.current_rep_scores = []
+        session.rep_min_elbow = 180.0
+        session.rep_min_hip_line_delta = 1.0
     elif exercise == "deadlift" and session.prev_phase == "setup" and phase == "execution":
         session.current_rep_scores = []
         session.rep_min_hinge = 180.0
@@ -580,7 +639,7 @@ def _analyze(exercise: str, session: SessionState, lm) -> Tuple[Dict[str, Any], 
 
     if session.prev_phase == "execution" and phase == "setup":
         should_count_rep = True
-        if exercise == "deadlift":
+        if exercise in ("pushup", "deadlift"):
             should_count_rep = bool(session.reached_bottom)
 
         if should_count_rep:
@@ -607,6 +666,15 @@ def _analyze(exercise: str, session: SessionState, lm) -> Tuple[Dict[str, Any], 
                     f"max_knee_diff={session.rep_max_knee_diff:.1f} "
                     f"feedback='{rep_feedback}'"
                 )
+            elif exercise == "pushup":
+                latest_rep_score, rep_feedback = _evaluate_pushup_rep(session, model_score)
+                coach = rep_feedback
+                session.last_rep_feedback = rep_feedback
+                session.feedback_frames_left = 20
+                print(
+                    f"[PU-REP] rep={session.reps} "
+                    f"score={latest_rep_score} feedback='{rep_feedback}'"
+                )
             else:
                 latest_rep_score = model_score
                 print(f"[REP] +1 rep! Total: {session.reps} Raw: {raw_score} -> Scaled: {latest_rep_score} ({exercise})")
@@ -616,6 +684,10 @@ def _analyze(exercise: str, session: SessionState, lm) -> Tuple[Dict[str, Any], 
             session.score_cache = latest_rep_score
         elif exercise == "deadlift" and not should_count_rep:
             coach = "hinge deeper before lockout"
+            session.last_rep_feedback = coach
+            session.feedback_frames_left = 20
+        elif exercise == "pushup" and not should_count_rep:
+            coach = "go lower before lockout"
             session.last_rep_feedback = coach
             session.feedback_frames_left = 20
 
@@ -637,6 +709,10 @@ def _analyze(exercise: str, session: SessionState, lm) -> Tuple[Dict[str, Any], 
         else:
             coach = ""
     elif exercise == "deadlift":
+        if session.feedback_frames_left > 0:
+            coach = session.last_rep_feedback
+            session.feedback_frames_left -= 1
+    elif exercise == "pushup":
         if session.feedback_frames_left > 0:
             coach = session.last_rep_feedback
             session.feedback_frames_left -= 1
