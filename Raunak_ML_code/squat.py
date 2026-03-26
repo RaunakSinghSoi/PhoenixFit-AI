@@ -42,24 +42,37 @@ def compute_squat_angles(lm, w, h):
         "torso": torso
     }
 
-# simplified phase logic
-# only "setup" (standing still) and "execution" (moving)
-def detect_phase(angles):
+def detect_phase(angles, prev_phase, reached_depth):
     knee_l = angles["knee_l"]
     knee_r = angles["knee_r"]
 
     if knee_l is None or knee_r is None:
-        return "setup"
+        return "setup", reached_depth
 
-    # fully upright = setup
-    if knee_l > 155 and knee_r > 155:
-        return "setup"
+    avg_knee = (knee_l + knee_r) / 2.0
 
-    # anything else = execution
-    return "execution"
+    STANDING_THRESHOLD = 155
+    BEND_THRESHOLD = 140
+    DEPTH_THRESHOLD = 110
 
-# basic coaching rules (lenient - only flag clearly bad form)
-def coaching_rules(angles):
+    if avg_knee < DEPTH_THRESHOLD:
+        reached_depth = True
+
+    if prev_phase == "setup":
+        if avg_knee < BEND_THRESHOLD:
+            return "execution", reached_depth
+        return "setup", reached_depth
+    else:
+        if avg_knee > STANDING_THRESHOLD:
+            return "setup", reached_depth
+        return "execution", reached_depth
+
+def coaching_rules(angles, phase, reached_depth):
+    if phase == "setup":
+        if reached_depth is False:
+            return ""
+        return ""
+
     knee_l = angles["knee_l"]
     knee_r = angles["knee_r"]
     torso = angles["torso"]
@@ -67,17 +80,13 @@ def coaching_rules(angles):
     if knee_l is None or knee_r is None:
         return ""
 
-    # only flag extremely deep squats (way past parallel)
-    if knee_l < 50 or knee_r < 50:
-        return "depth too low"
+    avg_knee = (knee_l + knee_r) / 2.0
 
-    # only flag significant knee imbalance
-    if abs(knee_l - knee_r) > 40:
-        return "knees caving in"
+    if torso is not None and torso > 55:
+        return "too much forward lean"
 
-    # only flag excessive forward lean
-    if torso > 55:
-        return "torso leaning forward"
+    if avg_knee > 120 and not reached_depth:
+        return "go deeper"
 
     return ""
 
@@ -91,14 +100,14 @@ def run_squat():
     )
 
     cap = cv2.VideoCapture(0)
-    smoother = SmootherDict(6)   # lighter smoothing
+    smoother = SmootherDict(6)
 
     reps = 0
     prev_phase = "setup"
+    reached_depth = False
 
     frame_id = 0
     score_cache = 75
-    ui_cache = None
 
     t0 = time.time()
     fps_val = 0
@@ -110,13 +119,11 @@ def run_squat():
 
         h, w = frame.shape[:2]
 
-        # resize frame for faster mediapipe (big fps boost)
         small = cv2.resize(frame, (640, 360))
         small_rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
 
         results = pose.process(small_rgb)
 
-        # fps calculation
         t1 = time.time()
         fps_val = 1.0 / (t1 - t0 + 1e-6)
         t0 = t1
@@ -129,20 +136,18 @@ def run_squat():
 
         lm = results.pose_landmarks.landmark
 
-        # compute angles
         angles_raw = compute_squat_angles(lm, w, h)
         angles = smoother.update(angles_raw)
 
-        # detect phase (setup or execution)
-        phase = detect_phase(angles)
+        phase, reached_depth = detect_phase(angles, prev_phase, reached_depth)
 
-        # rep logic: execution → setup
         if prev_phase == "execution" and phase == "setup":
-            reps += 1
+            if reached_depth:
+                reps += 1
+            reached_depth = False
         prev_phase = phase
 
-        # ml score every 5 frames (boosts fps)
-        if frame_id % 5 == 0:
+        if frame_id % 2 == 0:
             feat = [
                 angles["knee_l"],
                 angles["knee_r"],
@@ -150,9 +155,8 @@ def run_squat():
             ]
             score_cache = predict_score("squat", feat)
 
-        coach_text = coaching_rules(angles)
+        coach_text = coaching_rules(angles, phase, reached_depth)
 
-        # draw mediapipe skeleton
         mp.solutions.drawing_utils.draw_landmarks(
             frame,
             results.pose_landmarks,
@@ -168,21 +172,17 @@ def run_squat():
             "torso": angles["torso"]
         }
 
-        # update ui every 2 frames (balanced workload)
-        if frame_id % 2 == 0:
-            ui_cache = draw_full_overlay(
-                frame,
-                phase=phase,
-                reps=reps,
-                angles=angle_panel,
-                score=score_cache,
-                coach=coach_text,
-                fps=fps_val
-            )
-        else:
-            frame = ui_cache
+        ui_frame = draw_full_overlay(
+            frame,
+            phase=phase,
+            reps=reps,
+            angles=angle_panel,
+            score=score_cache,
+            coach=coach_text,
+            fps=fps_val
+        )
 
-        cv2.imshow("PhoenixFit – Squat", ui_cache)
+        cv2.imshow("PhoenixFit – Squat", ui_frame)
 
         key = cv2.waitKey(1) & 0xFF
         if key == 27:
