@@ -95,7 +95,7 @@ CapstoneFinal/
 ## Authors
 
 - Raunak Singh Soi – ML/Vision Code
-- [Your Name] – Mobile App Development
+
 
 ## License
 
